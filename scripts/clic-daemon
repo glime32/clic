@@ -1,0 +1,16 @@
+#!/bin/sh
+# Lance le démon clic avec la taille de l'écran en pixels réels (celle des captures).
+size=$(kscreen-doctor -j 2>/dev/null | python3 -I -c '
+import json, sys
+o = [o for o in json.load(sys.stdin)["outputs"] if o.get("enabled")]
+if len(o) == 1:
+    print(o[0]["size"]["width"], o[0]["size"]["height"], o[0].get("scale", 1))
+else:  # plusieurs écrans : rectangle englobant (logique) x la plus grande échelle
+    s = max(e.get("scale", 1) for e in o)
+    r = max(e["pos"]["x"] + e["size"]["width"] / e.get("scale", 1) for e in o)
+    b = max(e["pos"]["y"] + e["size"]["height"] / e.get("scale", 1) for e in o)
+    print(round(r * s), round(b * s), s)
+' 2>/dev/null)
+[ -n "$size" ] || size=$(head -n1 /sys/class/drm/card*-eDP-*/modes 2>/dev/null | head -n1 | tr x ' ')
+[ -n "$size" ] || size="1920 1080"
+exec "$HOME/.local/bin/clic" daemon $size

@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""clic-shot : capture d'écran avec une grille de coordonnées en pixels réels de l'écran,
+pour viser avec « clic ». Affiche le chemin de l'image produite.
+
+  clic-shot                  écran entier, réduit (~1440 px de large), grille tous les 200 px
+  clic-shot X Y L H          zone (coin x y, largeur, hauteur), agrandie, grille auto
+options :
+  -r        réutiliser la dernière capture (plusieurs zooms d'un même instant, sans recapturer)
+  -z F      facteur de zoom (ex. 0.5, 1, 3)
+  -g PAS    pas de la grille en pixels réels (0 = sans grille)
+  -o FICH   fichier de sortie
+Les nombres écrits sur la grille sont les coordonnées à donner à « clic ».
+"""
+import glob
+import os
+import struct
+import subprocess
+import sys
+import time
+
+NICE = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000]
+MAX_SIDE = 1600   # au-delà, l'image serait réduite à la lecture et la grille deviendrait illisible
+
+
+def die(msg):
+    print("clic-shot : " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    return struct.unpack(">II", head[16:24])
+
+
+def main():
+    args, reuse, zoom, step, out, nums = sys.argv[1:], False, None, None, None, []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-h", "--help"):
+            print(__doc__)
+            return
+        if a == "-r":
+            reuse = True
+        elif a in ("-z", "-g", "-o"):
+            if i + 1 >= len(args):
+                die(a + " : valeur manquante")
+            v = args[i + 1]
+            i += 1
+            try:
+                if a == "-z":
+                    zoom = float(v)
+                elif a == "-g":
+                    step = int(v)
+                else:
+                    out = v
+            except ValueError:
+                die(a + " : valeur invalide")
+        else:
+            try:
+                nums.append(int(a))
+            except ValueError:
+                die("argument inconnu : " + a)
+        i += 1
+    if len(nums) not in (0, 4):
+        die("zone attendue : X Y LARGEUR HAUTEUR")
+
+    d = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "clic")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    full = os.path.join(d, "full.png")
+    if not reuse or not os.path.exists(full):
+        r = subprocess.run(["spectacle", "-b", "-n", "-f", "-o", full],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode or not os.path.exists(full):
+            die("capture impossible (spectacle)")
+    W, H = png_size(full)
+
+    if nums:
+        x, y, w, h = nums
+        x, y = max(0, min(x, W - 1)), max(0, min(y, H - 1))
+        w, h = max(1, min(w, W - x)), max(1, min(h, H - y))
+    else:
+        x, y, w, h = 0, 0, W, H
+    if zoom is None:
+        zoom = min(4.0, MAX_SIDE / max(w, h)) if nums else min(1.0, 1440 / W)
+    if step is None:
+        target = max(w, h) / 9
+        step = min(NICE, key=lambda s: abs(s - target)) if nums else 200
+
+    for f in glob.glob(os.path.join(d, "shot-*.png")):   # ménage : captures de plus d'une heure
+        if time.time() - os.path.getmtime(f) > 3600:
+            os.unlink(f)
+    if not out:
+        out = os.path.join(d, time.strftime("shot-%H%M%S-") + str(int(time.time() * 1000) % 1000) + ".png")
+
+    cmd = ["magick", full, "-crop", f"{w}x{h}+{x}+{y}", "+repage",
+           "-filter", "Triangle" if zoom < 1 else "Point", "-resize", f"{zoom * 100:.4f}%"]
+    if step > 0:
+        ow, oh = round(w * zoom), round(h * zoom)
+        xs = range((x + step - 1) // step * step, x + w, step)
+        ys = range((y + step - 1) // step * step, y + h, step)
+        lines = " ".join(f"line {(g - x) * zoom:.1f},0 {(g - x) * zoom:.1f},{oh}" for g in xs)
+        lines += " " + " ".join(f"line 0,{(g - y) * zoom:.1f} {ow},{(g - y) * zoom:.1f}" for g in ys)
+        cmd += ["-fill", "none", "-stroke", "rgba(255,0,255,0.55)", "-strokewidth", "1", "-draw", lines,
+                "-stroke", "none", "-font", "DejaVu-Sans-Mono", "-pointsize", "13",
+                "-fill", "#ffeb3b", "-undercolor", "rgba(0,0,0,0.7)"]
+        for g in xs:
+            cmd += ["-annotate", f"+{(g - x) * zoom + 2:.0f}+13", str(g)]
+        for g in ys:
+            if (g - y) * zoom > 18:  # pas sur l'étiquette du haut
+                cmd += ["-annotate", f"+2+{(g - y) * zoom - 2:.0f}", str(g)]
+    cmd.append(out)
+    if subprocess.run(cmd).returncode:
+        die("magick a échoué")
+    print(out)
+
+
+if __name__ == "__main__":
+    main()
